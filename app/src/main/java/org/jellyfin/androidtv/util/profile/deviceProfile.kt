@@ -1,6 +1,7 @@
 package org.jellyfin.androidtv.util.profile
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.media3.common.MimeTypes
 import org.jellyfin.androidtv.constant.Codec
 import org.jellyfin.androidtv.preference.UserPreferences
@@ -15,7 +16,7 @@ import org.jellyfin.sdk.model.api.SubtitleDeliveryMethod
 import org.jellyfin.sdk.model.api.VideoRangeType
 import org.jellyfin.sdk.model.deviceprofile.DeviceProfileBuilder
 import org.jellyfin.sdk.model.deviceprofile.buildDeviceProfile
-import kotlin.math.roundToInt
+import org.koin.core.context.GlobalContext
 
 private val downmixSupportedAudioCodecs = arrayOf(
 	Codec.Audio.AAC,
@@ -65,13 +66,13 @@ private val hlsFmp4AudioCodecs = arrayOf(
 )
 
 private fun UserPreferences.getMaxBitrate(): Int {
-	var maxBitrate = this[UserPreferences.maxBitrate].toFloatOrNull()
-
-	// The value "0" was used in an older release, make sure we prevent that from being used to avoid video not playing
-	if (maxBitrate == null || maxBitrate < 0.01f) maxBitrate = UserPreferences.maxBitrate.defaultValue.toFloat()
-
-	// Convert megabit to bit
-	return (maxBitrate * 1_000_000).roundToInt()
+	// "auto" (the default) resolves to the recent sustained-bandwidth median kept by
+	// BandwidthMonitor. The session cache is invalidated when the active server or network changes,
+	// and falls back to a conservative ceiling until the new path has a measurement.
+	// GlobalContext is used intentionally: getMaxBitrate is a private extension function on a
+	// type we don't own, so KoinComponent doesn't apply.
+	val ceiling = GlobalContext.get().get<BandwidthEstimateStore>().ceilingBps(SystemClock.elapsedRealtime())
+	return MaxBitrateResolver.resolveBps(this[UserPreferences.maxBitrate], ceiling)
 }
 
 fun createDeviceProfile(

@@ -37,6 +37,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 import androidx.media3.exoplayer.util.EventLogger;
 import androidx.media3.extractor.DefaultExtractorsFactory;
@@ -55,6 +56,9 @@ import org.jellyfin.sdk.api.client.ApiClient;
 import org.jellyfin.sdk.model.api.MediaStream;
 import org.jellyfin.sdk.model.api.MediaStreamType;
 import org.jellyfin.sdk.model.api.SubtitleDeliveryMethod;
+import android.os.Looper;
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter;
+import org.jellyfin.androidtv.util.profile.PassiveBandwidthSampler;
 import org.koin.java.KoinJavaComponent;
 
 import java.util.ArrayList;
@@ -92,6 +96,7 @@ public class VideoManager {
 
     private final UserPreferences userPreferences = KoinJavaComponent.get(UserPreferences.class);
     private final HttpDataSource.Factory exoPlayerHttpDataSourceFactory = KoinJavaComponent.get(HttpDataSource.Factory.class);
+    private final PassiveBandwidthSampler passiveBandwidthSampler = KoinJavaComponent.get(PassiveBandwidthSampler.class);
 
     public VideoManager(@NonNull Activity activity, @NonNull View view, @NonNull PlaybackOverlayFragmentHelper helper) {
         mActivity = activity;
@@ -222,7 +227,27 @@ public class VideoManager {
         defaultRendererFactory.setEnableDecoderFallback(true);
         defaultRendererFactory.setExtensionRendererMode(determineExoPlayerExtensionRendererMode());
 
-        DefaultTrackSelector trackSelector = new DefaultTrackSelector(context);
+        // Two-way adaptive selection tuned for a weak/jittery uplink: climbs to a higher rung once the
+        // deep buffer below is filled (the buffer absorbs jitter), and drops a rung before that buffer
+        // is exhausted under sustained shortage. No separate downswitch logic — the tuning does both.
+        AdaptiveTrackSelection.Factory adaptiveTrackSelectionFactory = new AdaptiveTrackSelection.Factory(
+                10_000, // minDurationForQualityIncreaseMs (ExoPlayer default -> climb once 10s is buffered)
+                15_000, // maxDurationForQualityDecreaseMs (default 25_000 -> still drop ahead of a stall)
+                AdaptiveTrackSelection.DEFAULT_MIN_DURATION_TO_RETAIN_AFTER_DISCARD_MS,
+                0.75f   // bandwidthFraction (default 0.7 -> spend a bit more measured bandwidth on quality)
+        );
+        // Measure the link from the segment downloads playback is already doing. Real traffic on a warm
+        // connection beats any synthetic probe: no TCP slow-start to discard, no extra bytes, and it
+        // keeps measuring for as long as we watch. The samples set the ceiling for the NEXT stream.
+        DefaultBandwidthMeter bandwidthMeter = new DefaultBandwidthMeter.Builder(context).build();
+        bandwidthMeter.addEventListener(
+                new Handler(Looper.getMainLooper()),
+                (elapsedMs, bytesTransferred, bitrateEstimate) ->
+                        passiveBandwidthSampler.onBandwidthSample(bytesTransferred, bitrateEstimate)
+        );
+        exoPlayerBuilder.setBandwidthMeter(bandwidthMeter);
+
+        DefaultTrackSelector trackSelector = new DefaultTrackSelector(context, adaptiveTrackSelectionFactory);
         trackSelector.setParameters(trackSelector.buildUponParameters()
                 .setAudioOffloadPreferences(new TrackSelectionParameters.AudioOffloadPreferences.Builder()
                         .setAudioOffloadMode(TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED)
@@ -260,7 +285,11 @@ public class VideoManager {
                     .setBufferDurationsMs(80_000, 240_000, 5_000, 10_000)
                     .build();
         } else {
-            loadControl = new DefaultLoadControl();
+            // AUTO default: use a deep buffer. Transcoded HLS over a weak/jittery uplink benefits
+            // from a large buffer to absorb jitter and let ABR hold a higher rung without stalling.
+            loadControl = new DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(80_000, 240_000, 2_500, 5_000)
+                    .build();
         }
         exoPlayerBuilder.setLoadControl(loadControl);
 
@@ -349,6 +378,7 @@ public class VideoManager {
     }
 
     public void stopPlayback() {
+        passiveBandwidthSampler.onStreamStopped();
         if (mExoPlayer != null) {
             mExoPlayer.stop();
 
@@ -418,6 +448,10 @@ public class VideoManager {
                     .setUri(Uri.parse(path))
                     .setSubtitleConfigurations(subtitleConfigurations)
                     .build();
+
+            // Restart the grace period: right after a stream starts, segment delivery is paced by the
+            // transcode catching up rather than by the link, so those samples would under-read.
+            passiveBandwidthSampler.onStreamStarted();
 
             mExoPlayer.setMediaItem(mediaItem);
             mExoPlayer.prepare();

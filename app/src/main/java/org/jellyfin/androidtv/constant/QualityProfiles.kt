@@ -2,6 +2,7 @@ package org.jellyfin.androidtv.constant
 
 import android.content.Context
 import org.jellyfin.androidtv.R
+import org.jellyfin.androidtv.util.profile.MaxBitrateResolver
 
 @Suppress("MagicNumber")
 private val qualityOptions = setOf(
@@ -14,12 +15,14 @@ private val qualityOptions = setOf(
 @Suppress("MagicNumber")
 fun getQualityProfiles(
 	context: Context
-): Map<String, String> = qualityOptions.associate {
-	val value = when {
-		it >= 1.0 -> context.getString(R.string.bitrate_mbit, it)
-		else -> context.getString(R.string.bitrate_kbit, it * 1000.0)
+): Map<String, String> = buildMap {
+	put(MaxBitrateResolver.AUTO, context.getString(R.string.bitrate_auto))
+	qualityOptions.forEach {
+		val value = when {
+			it >= 1.0 -> context.getString(R.string.bitrate_mbit, it)
+			else -> context.getString(R.string.bitrate_kbit, it * 1000.0)
+		}
+		put(it.toString().removeSuffix(".0"), value)
 	}
-
-	it.toString().removeSuffix(".0") to value
 }
 

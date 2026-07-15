@@ -1,7 +1,12 @@
 package org.jellyfin.androidtv.preference
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.preference.PreferenceManager
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import org.jellyfin.androidtv.preference.UserPreferences.Companion.screensaverInAppEnabled
 import org.jellyfin.androidtv.preference.constant.AVCLevel
 import org.jellyfin.androidtv.preference.constant.AppTheme
@@ -36,6 +41,16 @@ import kotlin.time.Duration.Companion.minutes
 class UserPreferences(context: Context) : SharedPreferenceStore(
 	sharedPreferences = PreferenceManager.getDefaultSharedPreferences(context)
 ) {
+	/** Emits the current Max Bitrate value and every subsequent change. */
+	fun maxBitrateFlow(): Flow<String> = callbackFlow {
+		val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+			if (key == maxBitrate.key) trySend(this@UserPreferences[maxBitrate])
+		}
+		sharedPreferences.registerOnSharedPreferenceChangeListener(listener)
+		trySend(this@UserPreferences[maxBitrate])
+		awaitClose { sharedPreferences.unregisterOnSharedPreferenceChangeListener(listener) }
+	}.distinctUntilChanged()
+
 	companion object {
 		/* Display */
 		/**
@@ -52,7 +67,7 @@ class UserPreferences(context: Context) : SharedPreferenceStore(
 		/**
 		 * Maximum bitrate in megabit for playback.
 		 */
-		var maxBitrate = stringPreference("pref_max_bitrate", "100")
+		var maxBitrate = stringPreference("pref_max_bitrate", "auto")
 
 		/**
 		 * Auto-play next item

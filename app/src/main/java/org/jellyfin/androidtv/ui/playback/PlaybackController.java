@@ -875,7 +875,11 @@ public class PlaybackController implements PlaybackControllerNotifiable {
         if (mPlaybackState != PlaybackState.IDLE && mPlaybackState != PlaybackState.UNDEFINED) {
             mPlaybackState = PlaybackState.IDLE;
 
-            if (mVideoManager != null && mVideoManager.isPlaying()) mVideoManager.stopPlayback();
+            // Tear down on any real stop, not only while actively playing: a paused/buffering/seeking
+            // player still holds a live ExoPlayer and a running bandwidth-sampler session, and both
+            // need to be stopped here. Gating on isPlaying() (true only in PLAYING) leaked exactly the
+            // way the probe guard used to — see isPlaybackSessionActive().
+            if (mVideoManager != null) mVideoManager.stopPlayback();
             if (getCurrentlyPlayingItem() != null && mCurrentStreamInfo != null) {
                 Long mbPos = mCurrentPosition * 10000;
                 reportingHelper.getValue().reportStopped(mFragment, getCurrentlyPlayingItem(), mCurrentStreamInfo, mbPos);
@@ -1337,6 +1341,15 @@ public class PlaybackController implements PlaybackControllerNotifiable {
         return mPlaybackState == PlaybackState.PAUSED;
     }
 
+    /**
+     * True while a playback session is live — including while paused, buffering or seeking. Use
+     * this, not {@link #isPlaying()}, to decide whether something else may use the link: isPlaying()
+     * is false during a rebuffer, which is exactly when the link is busiest.
+     */
+    public boolean isPlaybackSessionActive() {
+        return mPlaybackState.isSessionActive();
+    }
+
     public @NonNull ZoomMode getZoomMode() {
         return hasInitializedVideoManager() ? mVideoManager.getZoomMode() : ZoomMode.FIT;
     }
@@ -1356,6 +1369,17 @@ public class PlaybackController implements PlaybackControllerNotifiable {
         IDLE,
         SEEKING,
         UNDEFINED,
-        ERROR
+        ERROR;
+
+        /**
+         * True while a playback session is live and still moving data over the link.
+         *
+         * Note this deliberately includes PAUSED, BUFFERING and SEEKING, not just PLAYING: a paused
+         * or rebuffering player keeps filling its (deep) buffer, so it competes with anything else
+         * on the link exactly as an actively playing one does.
+         */
+        public boolean isSessionActive() {
+            return this == PLAYING || this == PAUSED || this == BUFFERING || this == SEEKING;
+        }
     }
 }
